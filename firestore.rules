@@ -1,0 +1,100 @@
+rules_version = '2';
+
+/**
+ * Firestore security rules (AGENTS brief §10.2 — blocking).
+ *
+ * The legacy repo had no firestore.rules file in its codebase at all — rules
+ * lived only in the Firebase console, unaudited and unversioned. This file
+ * is the actual, deployable rule set. Deploy with:
+ *
+ *   firebase deploy --only firestore:rules
+ *
+ * Design:
+ * - Public forms (contact, volunteer, newsletter, leave-a-review) write
+ *   directly from the browser via the Firebase client SDK, so those
+ *   collections must allow unauthenticated `create`. They do NOT allow
+ *   unauthenticated `read`, `update`, or `delete` — a public API key is not
+ *   a secret, so without this, anyone could read every message or donor
+ *   record just by calling the Firestore SDK directly with the same key
+ *   this site ships to the browser.
+ * - `visitors` allows NO client writes at all, authenticated or not — only
+ *   the visitor-cookie route writes it, via the Admin SDK, which bypasses
+ *   these rules entirely.
+ * - `donors` is locked the same way (no client writes) even though nothing
+ *   currently writes it — there's no Stripe webhook (client request: Stripe's
+ *   own receipt covers the donor-facing email, TrueGems follows up manually).
+ *   Left locked down rather than opened up, so that if a manual-entry or
+ *   Stripe-API-backed flow gets added later, it has to go through a trusted
+ *   server route rather than a client write anyone could forge.
+ * - `testimonials` enforces the pending/approved workflow server-side, not
+ *   just in the UI: a create must set status "pending" (a submission can't
+ *   self-approve), and public reads only ever see status "approved".
+ * - `gallery` is publicly readable (it's the public gallery page) but only
+ *   admin-writable.
+ * - `admins` and `auditLog` are admin-only for both read and write from the
+ *   client; `auditLog` entries are actually written via the Admin SDK from
+ *   each admin mutation's API route, same trust boundary as donors/visitors.
+ *
+ * "Authenticated" below means a real Firebase Auth session — every admin
+ * account is provisioned by hand in the Firebase console (see CONTENT_TODO.md
+ * / Phase 7 notes); there is no public sign-up path that could create one.
+ */
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    match /messages/{id} {
+      allow create: if true;
+      allow read, update, delete: if isAuthenticated();
+    }
+
+    match /volunteers/{id} {
+      allow create: if true;
+      allow read, update, delete: if isAuthenticated();
+    }
+
+    match /newsletter/{id} {
+      allow create: if true;
+      allow read, update, delete: if isAuthenticated();
+    }
+
+    match /testimonials/{id} {
+      allow create: if request.resource.data.status == "pending";
+      // Covers both get and list. For list, Firestore checks this per
+      // candidate document as the query runs — an unauthenticated query
+      // must include `where("status", "==", "approved")` (see
+      // src/context/testimonial-context.tsx) or Firestore rejects it
+      // outright, since it can't prove every possible result would satisfy
+      // resource.data.status == "approved" otherwise. An authenticated
+      // admin query has no such constraint and sees everything.
+      allow read: if resource.data.status == "approved" || isAuthenticated();
+      allow update, delete: if isAuthenticated();
+    }
+
+    match /gallery/{id} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    match /donors/{id} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if false;
+    }
+
+    match /visitors/{id} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if false;
+    }
+
+    match /admins/{id} {
+      allow read, write: if false;
+    }
+
+    match /auditLog/{id} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+  }
+}
